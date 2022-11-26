@@ -1,11 +1,10 @@
-use std::str;
 #[macro_use] extern crate log;
 
-use std::io::BufRead;
-use tokio::net::TcpStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::io::AsyncReadExt;
 use std::error::Error;
 use std::collections::HashMap;
+use std::str;
 
 #[derive(Debug)]
 pub enum Method {
@@ -72,7 +71,7 @@ impl HttpRequest {
         headers
     }
 
-    async fn pull(stream: &mut TcpStream) -> Vec<u8> {
+    async fn pull(stream: &mut OwnedReadHalf) -> Vec<u8> {
         let mut res: Vec<u8> = Vec::new();
         let mut buf = [0; 1024];
         match stream.read(&mut buf).await {
@@ -88,7 +87,7 @@ impl HttpRequest {
         res
     }
 
-    pub async fn decode(mut stream: TcpStream) -> Result<HttpRequest, Box<dyn Error>> {
+    pub async fn decode(mut stream: OwnedReadHalf) -> Result<HttpRequest, Box<dyn Error>> {
         let mut buf: Vec<u8> = Vec::new();
         let data = HttpRequest::pull(&mut stream).await;
         buf.extend_from_slice(&data);
