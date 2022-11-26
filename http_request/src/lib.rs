@@ -6,7 +6,7 @@ use std::error::Error;
 use std::collections::HashMap;
 use std::str;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Method {
     GET,
     POST
@@ -115,6 +115,9 @@ impl HttpRequest {
                         let (method, uri, version) = HttpRequest::parse_head(&head);
                         let headers = HttpRequest::parse_headers(&head);
                         http_request.set_head(method, uri, version, headers);
+                        if http_request.method.as_ref().unwrap() == &Method::GET {
+                            break;
+                        }
                     },
                     None => continue,
                 }
