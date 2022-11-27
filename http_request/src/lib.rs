@@ -1,7 +1,7 @@
 #[macro_use] extern crate log;
 
-use tokio::net::tcp::OwnedReadHalf;
-use tokio::io::AsyncReadExt;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::error::Error;
 use std::collections::HashMap;
 use std::str;
@@ -142,5 +142,35 @@ impl HttpRequest {
         }
 
         Ok(http_request)
+    }
+
+}
+
+pub struct HttpResponse {
+    pub version: String,
+    pub status_code: usize,
+    pub status: String,
+    pub body: String,
+}
+
+impl HttpResponse {
+    pub fn new(version: String, status_code: usize, status: String, body: String) -> Self {
+        HttpResponse {
+            version,
+            status_code,
+            status,
+            body
+        }
+    }
+
+    pub async fn encode(&self, mut write_stream: OwnedWriteHalf) {
+        let head = format!("{} {} {}", self.version, self.status_code, self.status);
+        let headers: HashMap<String, String> = HashMap::from([
+            ("Content-Length".to_string(), self.body.len().to_string())
+        ]);
+        let headers = headers.iter().map(|(key, val)| format!("{}: {}", key, val)).collect::<Vec<String>>().join("\n");
+        let response = format!("{}\r\n{:?}\r\n\r\n{}", head, headers, self.body);
+
+        let _ = write_stream.write_all(&response.as_bytes()).await;
     }
 }
