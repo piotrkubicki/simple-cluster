@@ -237,6 +237,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "http_request"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "tokio",
+]
+
+[[package]]
 name = "httparse"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1140,6 +1149,7 @@ name = "worker-node"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "http_request",
  "log",
  "reqwest",
  "tokio",

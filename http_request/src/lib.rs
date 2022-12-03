@@ -166,11 +166,10 @@ impl HttpResponse {
     pub async fn encode(&self, mut write_stream: OwnedWriteHalf) {
         let head = format!("{} {} {}", self.version, self.status_code, self.status);
         let headers: HashMap<String, String> = HashMap::from([
-            ("Content-Length".to_string(), self.body.len().to_string())
+            ("Content-Length".to_string(), (self.body.len()+1).to_string()),
         ]);
         let headers = headers.iter().map(|(key, val)| format!("{}: {}", key, val)).collect::<Vec<String>>().join("\n");
-        let response = format!("{}\r\n{:?}\r\n\r\n{}", head, headers, self.body);
-
+        let response = format!("{}\r\n{}\r\n\r\n{}", head, headers, self.body);
         let _ = write_stream.write_all(&response.as_bytes()).await;
     }
 }

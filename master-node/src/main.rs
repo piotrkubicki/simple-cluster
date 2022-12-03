@@ -40,7 +40,6 @@ impl WorkerConnectionError {
     }
 }
 
-type HealthCheckRes = Box<dyn Future<Output=()> + Send + 'static>;
 
 struct Worker {
     id: usize,
@@ -103,20 +102,35 @@ impl MasterNode {
         let workers = self.workers.clone();
         let client = self.client.clone();
         task::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(6));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 info!("Checkings workers health...");
                 interval.tick().await;
-                let workers = &mut workers.lock().await;
-                info!("Workers: {}", workers.len());
-            //        for worker in workers {
-                if workers.len() > 0 {
-                    workers[0].healthcheck(&client).await;
+                let mut workers = workers.lock().await;
+                for worker in &mut *workers {
+                    worker.healthcheck(&client).await;
                 }
             }
         });
     }
 
+    async fn run_task(&self, http_request: &HttpRequest) -> Result<(), Box<dyn Error>>{
+        let workers = self.workers.clone();
+        let client = self.client.clone();
+        let join = tokio::task::spawn(async move {
+            info!("Running task...");
+            let mut workers = workers.as_ref().lock().await;
+            for worker in &mut *workers {
+                client.post(format!("{}/task", worker.url))
+                    .header("content-length", 3)
+                    .body("aaa").send().await;
+            }
+
+        });
+
+        join.await?;
+        Ok(())
+    }
 }
 
 async fn route(node: &mut MasterNode, request: &HttpRequest) {
@@ -129,7 +143,10 @@ async fn route(node: &mut MasterNode, request: &HttpRequest) {
         Some("/status") => {
             println!("Checking status");
             node.check_workers_status().await;
-        }
+        },
+        Some("/task") => {
+            let _ = node.run_task(&request).await;
+        },
         _ => println!("404"),
     }
 }
@@ -148,11 +165,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(&addr).await?;
 
     node.workers_healthcheck();
-    tokio::join!(async {loop {
+
+    loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let (read_stream, write_stream) = stream.into_split();
                 let req = HttpRequest::decode(read_stream).await;
+                info!("{:?}", req);
                 match req {
                     Ok(req) => {
                         route(&mut node, &req).await;
@@ -164,12 +183,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         );
                         response.encode(write_stream).await;
                     },
-                    Err(e) => eprintln!("{e}")
+                    Err(e) => {
+                        eprintln!("{e}");
+                        break;
+                    }
                 }
             },
-            _ => continue,
+            Err(e) => {
+                eprintln!("{e}");
+                break;
+            }
         }
-    }});
+    }
 
     Ok(())
 }
