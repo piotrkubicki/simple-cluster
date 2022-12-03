@@ -1,5 +1,7 @@
-use std::error::Error;
+use std::{error::Error, thread::JoinHandle};
 use std::env;
+use std::sync::mpsc;
+use std::{thread, time};
 
 use tokio::net::TcpListener;
 
@@ -14,14 +16,27 @@ struct Worker {
     client: Client,
     url: String,
     master_url: String,
+    thread: JoinHandle<()>,
+    sender: mpsc::Sender<usize>
 }
 
 impl Worker {
     fn new(client: Client, url: String, master_url: String) -> Worker {
+        let (sender, receiver) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            loop {
+                let _ = receiver.recv().unwrap();
+                thread::sleep(time::Duration::from_secs(5));
+                info!("Jobs done!");
+            }
+        });
+
         Worker {
             client,
             url,
             master_url,
+            thread,
+            sender,
         }
     }
 
@@ -38,6 +53,7 @@ impl Worker {
 
     fn process_task(&self) {
         info!("Processing...");
+        self.sender.send(2).unwrap();
     }
 }
 
@@ -58,7 +74,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = format!("{}:{}", ip_addr, port);
 
     let client = Client::new();
-    let worker_url = addr.clone();
+    let worker_url = format!("http://localhost:{port}");
     let master_url = env::var("MASTER_URL").unwrap();
     let mut worker = Worker::new(client, worker_url, master_url);
     info!("Registering...");

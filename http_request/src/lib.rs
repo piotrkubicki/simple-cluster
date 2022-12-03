@@ -50,7 +50,6 @@ impl HttpRequest {
             }
             _ => panic!("Malformed header"),
         };
-        info!("Method name: {}", method);
         let method = match method {
             "GET" => Method::GET,
             "POST" => Method::POST,
@@ -79,9 +78,7 @@ impl HttpRequest {
                 let buf = &buf[..n];
                 res.extend_from_slice(buf);
             },
-            Err(e) => {
-                eprintln!("Cannot read from stream: {e}");
-            }
+            Err(e) => eprintln!("Cannot read from stream: {e}"),
         }
 
         res

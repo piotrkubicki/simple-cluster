@@ -4,16 +4,16 @@ use core::fmt;
 use std::error::Error;
 use std::io::BufRead;
 use std::sync::Arc;
-use std::future::Future;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 use tokio::task;
-use tokio::time::{sleep, Duration};
 use tokio::sync::Mutex;
 use http_request::{HttpRequest, HttpResponse};
+
+use futures::future::join_all;
 
 use reqwest::Client;
 
@@ -40,7 +40,6 @@ impl WorkerConnectionError {
     }
 }
 
-
 struct Worker {
     id: usize,
     url: String,
@@ -61,12 +60,19 @@ impl Worker {
     }
 
     async fn healthcheck(&mut self, client: &Client) {
-        info!("Checking");
-        if let Ok(res) = client.get(format!("{}/healthcheck", self.url)).send().await {
-            info!("{:?}", res);
-            if !res.status().is_success() {
-                self.status = WorkerStatus::ERROR;
-            }
+        let healthcheck = client.get(format!("{}/healthcheck", self.url)).send();
+        match tokio::time::timeout(tokio::time::Duration::from_secs(2), healthcheck).await {
+            Ok(res) => {
+                match res {
+                    Ok(res) => {
+                        if !res.status().is_success() {
+                            self.status = WorkerStatus::ERROR;
+                        }
+                    },
+                    Err(_) => self.status = WorkerStatus::ERROR,
+                }
+            },
+            Err(e) => eprintln!("Something goes wrong {e}"),
         }
     }
 }
@@ -86,35 +92,48 @@ impl MasterNode {
         }
     }
 
-    async fn register_worker(&mut self, worker_url: String) {
+    async fn register_worker(&mut self, worker_url: String) -> Result<HttpResponse, Box<dyn Error>> {
         let worker = Worker::new(1, worker_url);
         self.workers.lock().await.push(worker);
+        Ok(HttpResponse::new(
+            "HTTP/1.1".to_string(),
+            200,
+            "OK".to_string(),
+            "OK".to_string(),
+        ))
     }
 
-    async fn check_workers_status(&self) {
+    async fn check_workers_status(&self) -> Result<HttpResponse, Box<dyn Error>> {
         let workers = &self.workers.lock().await;
+        let mut response = String::new();
         for worker in workers.iter() {
-            info!("URL: {} STATUS: {:?}", worker.url, worker.status);
+            response.push_str(&format!("URL: {} STATUS: {:?}\n", worker.url, worker.status));
         }
+        Ok(HttpResponse::new(
+            "HTTP/1.1".to_string(),
+            200,
+            "OK".to_string(),
+            response,
+        ))
     }
 
     fn workers_healthcheck(&mut self) {
         let workers = self.workers.clone();
         let client = self.client.clone();
         task::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
-                info!("Checkings workers health...");
                 interval.tick().await;
+                info!("Checkings workers health...");
                 let mut workers = workers.lock().await;
-                for worker in &mut *workers {
-                    worker.healthcheck(&client).await;
-                }
+                let tasks: Vec<_> = workers.iter_mut().map(|worker| worker.healthcheck(&client)).collect();
+                join_all(tasks).await;
+                info!("Health check done");
             }
         });
     }
 
-    async fn run_task(&self, http_request: &HttpRequest) -> Result<(), Box<dyn Error>>{
+    async fn run_task(&self, http_request: &HttpRequest) -> Result<HttpResponse, Box<dyn Error>>{
         let workers = self.workers.clone();
         let client = self.client.clone();
         let join = tokio::task::spawn(async move {
@@ -129,25 +148,25 @@ impl MasterNode {
         });
 
         join.await?;
-        Ok(())
+        Ok(HttpResponse::new(
+            "HTTP/1.1".to_string(),
+            200,
+            "OK".to_string(),
+            "OK".to_string(),
+        ))
     }
 }
 
-async fn route(node: &mut MasterNode, request: &HttpRequest) {
+async fn route(node: &mut MasterNode, request: &HttpRequest) -> HttpResponse {
     match request.uri.as_deref() {
         Some("/register") => {
             println!("Registering");
             let worker_url = &request.body.as_ref().unwrap();
-            node.register_worker(worker_url.to_string()).await;
+            node.register_worker(worker_url.to_string()).await.unwrap()
         },
-        Some("/status") => {
-            println!("Checking status");
-            node.check_workers_status().await;
-        },
-        Some("/task") => {
-            let _ = node.run_task(&request).await;
-        },
-        _ => println!("404"),
+        Some("/status") => node.check_workers_status().await.unwrap(),
+        Some("/task") => node.run_task(&request).await.unwrap(),
+        _ => HttpResponse::new("HTTP/1.1".to_string(), 404, "NOT FOUND".to_string(), "".to_string()),
     }
 }
 
@@ -171,16 +190,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok((stream, _)) => {
                 let (read_stream, write_stream) = stream.into_split();
                 let req = HttpRequest::decode(read_stream).await;
-                info!("{:?}", req);
                 match req {
                     Ok(req) => {
-                        route(&mut node, &req).await;
-                        let response = HttpResponse::new(
-                            req.version.unwrap(),
-                            200,
-                            "OK".to_string(),
-                            "OK".to_string(),
-                        );
+                        let response = route(&mut node, &req).await;
                         response.encode(write_stream).await;
                     },
                     Err(e) => {
