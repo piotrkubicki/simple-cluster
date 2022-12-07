@@ -2,12 +2,9 @@
 
 use core::fmt;
 use std::error::Error;
-use std::io::BufRead;
 use std::sync::Arc;
 
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio::task;
 use tokio::sync::Mutex;
@@ -96,7 +93,6 @@ impl MasterNode {
         let worker = Worker::new(1, worker_url);
         self.workers.lock().await.push(worker);
         Ok(HttpResponse::new(
-            "HTTP/1.1".to_string(),
             200,
             "OK".to_string(),
             "OK".to_string(),
@@ -110,7 +106,6 @@ impl MasterNode {
             response.push_str(&format!("URL: {} STATUS: {:?}\n", worker.url, worker.status));
         }
         Ok(HttpResponse::new(
-            "HTTP/1.1".to_string(),
             200,
             "OK".to_string(),
             response,
@@ -133,23 +128,35 @@ impl MasterNode {
         });
     }
 
-    async fn run_task(&self, http_request: &HttpRequest) -> Result<HttpResponse, Box<dyn Error>>{
+    async fn run_task(&self, req: &HttpRequest) -> Result<HttpResponse, Box<dyn Error>> {
         let workers = self.workers.clone();
         let client = self.client.clone();
-        let join = tokio::task::spawn(async move {
-            info!("Running task...");
-            let mut workers = workers.as_ref().lock().await;
-            for worker in &mut *workers {
-                client.post(format!("{}/task", worker.url))
-                    .header("content-length", 3)
-                    .body("aaa").send().await;
-            }
 
-        });
+        match &req.body {
+            Some(_task) => {
+                tokio::task::spawn(async move {
+                    info!("Running task...");
+                    let mut workers = workers.as_ref().lock().await;
+                    for worker in &mut *workers {
+                        let _ = client.post(format!("{}/task", worker.url))
+                            .header("content-length", 3)
+                            .body("aaa").send().await;
+                        worker.status = WorkerStatus::RUNNING;
+                    }
+                }).await?;
+            },
+            None => info!("No data received for processing"),
+        }
 
-        join.await?;
         Ok(HttpResponse::new(
-            "HTTP/1.1".to_string(),
+            200,
+            "OK".to_string(),
+            "OK".to_string(),
+        ))
+    }
+
+    async fn process_result(&self, _req: &HttpRequest) -> Result<HttpResponse, Box<dyn Error>> {
+        Ok(HttpResponse::new(
             200,
             "OK".to_string(),
             "OK".to_string(),
@@ -157,16 +164,17 @@ impl MasterNode {
     }
 }
 
-async fn route(node: &mut MasterNode, request: &HttpRequest) -> HttpResponse {
-    match request.uri.as_deref() {
+async fn route(node: &mut MasterNode, req: &HttpRequest) -> Result<HttpResponse, Box<dyn Error>> {
+    match req.uri.as_deref() {
         Some("/register") => {
-            println!("Registering");
-            let worker_url = &request.body.as_ref().unwrap();
-            node.register_worker(worker_url.to_string()).await.unwrap()
+            info!("Registering");
+            let worker_url = &req.body.as_ref().unwrap();
+            node.register_worker(worker_url.to_string()).await
         },
-        Some("/status") => node.check_workers_status().await.unwrap(),
-        Some("/task") => node.run_task(&request).await.unwrap(),
-        _ => HttpResponse::new("HTTP/1.1".to_string(), 404, "NOT FOUND".to_string(), "".to_string()),
+        Some("/status") => node.check_workers_status().await,
+        Some("/task") => node.run_task(&req).await,
+        Some("/result") => node.process_result(&req).await,
+        _ => Ok(HttpResponse::new(404, "NOT FOUND".to_string(), "".to_string())),
     }
 }
 
@@ -193,7 +201,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 match req {
                     Ok(req) => {
                         let response = route(&mut node, &req).await;
-                        response.encode(write_stream).await;
+                        match response {
+                            Ok(response) => response.encode(write_stream).await,
+                            Err(e) => eprintln!("Something goes wrong {e}")
+                        }
                     },
                     Err(e) => {
                         eprintln!("{e}");

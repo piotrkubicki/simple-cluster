@@ -23,11 +23,19 @@ struct Worker {
 impl Worker {
     fn new(client: Client, url: String, master_url: String) -> Worker {
         let (sender, receiver) = mpsc::channel();
+        let master_url_clone = master_url.clone();
+
         let thread = thread::spawn(move || {
             loop {
+                let client = reqwest::blocking::Client::new();
                 let _ = receiver.recv().unwrap();
-                thread::sleep(time::Duration::from_secs(5));
+                thread::sleep(time::Duration::from_secs(15));
                 info!("Jobs done!");
+                let response = "some results".to_string();
+                let _ = client.post(format!("{}/result", &master_url_clone))
+                    .header(CONTENT_LENGTH, response.len())
+                    .body(response)
+                    .send();
             }
         });
 
@@ -47,22 +55,26 @@ impl Worker {
         Ok(())
     }
 
-    fn healthcheck(&self) {
-        info!("Worker alive");
+    fn healthcheck(&self) -> Result<HttpResponse, Box<dyn Error>> {
+        Ok(HttpResponse::new(200, "OK".to_string(), "OK".to_string()))
     }
 
-    fn process_task(&self) {
+    fn process_task(&self) -> Result<HttpResponse, Box<dyn Error>> {
         info!("Processing...");
         self.sender.send(2).unwrap();
+        Ok(HttpResponse::new(200, "OK".to_string(), "OK".to_string()))
     }
 }
 
-
-async fn route(node: &mut Worker, req: &HttpRequest) {
+async fn route(node: &mut Worker, req: &HttpRequest) -> Result<HttpResponse, Box<dyn Error>> {
     match req.uri.as_deref() {
         Some("/healthcheck") => node.healthcheck(),
         Some("/task") => node.process_task(),
-        _ => println!("404"),
+        _ => Ok(HttpResponse::new(
+            404,
+            "NOT FOUND".to_string(),
+            "".to_string()
+        ))
     }
 }
 
@@ -89,14 +101,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let req = HttpRequest::decode(read_stream).await;
                 match req {
                     Ok(req) => {
-                        route(&mut worker, &req).await;
-                        let response = HttpResponse::new(
-                            req.version.unwrap(),
-                            200,
-                            "OK".to_string(),
-                            "OK".to_string(),
-                        );
-                        response.encode(write_stream).await;
+                        let response = route(&mut worker, &req).await;
+                        match response {
+                            Ok(response) => response.encode(write_stream).await,
+                            Err(e) => eprintln!("Something goes wrong {e}")
+                        }
                     },
                     Err(e) => {
                         eprintln!("{e}");
@@ -110,6 +119,5 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-
     Ok(())
 }

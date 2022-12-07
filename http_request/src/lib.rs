@@ -151,9 +151,9 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
-    pub fn new(version: String, status_code: usize, status: String, body: String) -> Self {
+    pub fn new(status_code: usize, status: String, body: String) -> Self {
         HttpResponse {
-            version,
+            version: "HTTP/1.1".to_string(),
             status_code,
             status,
             body
