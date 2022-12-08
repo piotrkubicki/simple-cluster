@@ -14,10 +14,12 @@ use futures::future::join_all;
 
 use reqwest::Client;
 
+use serde::Deserialize;
+
 const IP_ADDRES: &str = "0.0.0.0";
 const PORT_NUMBER: isize = 5100;
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
 enum WorkerStatus {
     IDLE,
     RUNNING,
@@ -25,31 +27,21 @@ enum WorkerStatus {
 }
 
 #[derive(Debug, Clone)]
-struct WorkerConnectionError {
-    id: usize
-}
+struct WorkerConnectionError {}
 
 impl Error for WorkerConnectionError{}
 
-impl WorkerConnectionError {
-    fn new(id: usize) -> WorkerConnectionError {
-        WorkerConnectionError { id }
-    }
-}
-
 struct Worker {
-    id: usize,
     url: String,
     handle: Option<JoinHandle<String>>,
     status: WorkerStatus,
 }
 
 impl Worker {
-    fn new(id: usize, url: String) -> Worker {
+    fn new(url: String) -> Worker {
         let handle = None;
         let status = WorkerStatus::IDLE;
         Worker {
-            id,
             url,
             handle,
             status,
@@ -64,6 +56,11 @@ impl Worker {
                     Ok(res) => {
                         if !res.status().is_success() {
                             self.status = WorkerStatus::ERROR;
+                        } else {
+                            match res.json().await {
+                                Ok(status) => self.status = status,
+                                Err(e) => eprintln!("{e}"),
+                            }
                         }
                     },
                     Err(_) => self.status = WorkerStatus::ERROR,
@@ -90,7 +87,7 @@ impl MasterNode {
     }
 
     async fn register_worker(&mut self, worker_url: String) -> Result<HttpResponse, Box<dyn Error>> {
-        let worker = Worker::new(1, worker_url);
+        let worker = Worker::new(worker_url);
         self.workers.lock().await.push(worker);
         Ok(HttpResponse::new(
             200,
@@ -133,14 +130,15 @@ impl MasterNode {
         let client = self.client.clone();
 
         match &req.body {
-            Some(_task) => {
+            Some(task) => {
+                let task = task.clone();
                 tokio::task::spawn(async move {
                     info!("Running task...");
                     let mut workers = workers.as_ref().lock().await;
                     for worker in &mut *workers {
                         let _ = client.post(format!("{}/task", worker.url))
-                            .header("content-length", 3)
-                            .body("aaa").send().await;
+                            .header("content-length", task.len())
+                            .body(task.to_string()).send().await;
                         worker.status = WorkerStatus::RUNNING;
                     }
                 }).await?;
@@ -172,15 +170,15 @@ async fn route(node: &mut MasterNode, req: &HttpRequest) -> Result<HttpResponse,
             node.register_worker(worker_url.to_string()).await
         },
         Some("/status") => node.check_workers_status().await,
-        Some("/task") => node.run_task(&req).await,
-        Some("/result") => node.process_result(&req).await,
+        Some("/task") => node.run_task(req).await,
+        Some("/result") => node.process_result(req).await,
         _ => Ok(HttpResponse::new(404, "NOT FOUND".to_string(), "".to_string())),
     }
 }
 
 impl fmt::Display for WorkerConnectionError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "cannot connect with worker {}", self.id)
+        write!(f, "cannot connect with worker")
     }
 }
 

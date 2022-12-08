@@ -148,23 +148,36 @@ pub struct HttpResponse {
     pub status_code: usize,
     pub status: String,
     pub body: String,
+    pub headers: HashMap<String, String>,
 }
 
 impl HttpResponse {
     pub fn new(status_code: usize, status: String, body: String) -> Self {
+        let headers: HashMap<String, String> = HashMap::new();
         HttpResponse {
             version: "HTTP/1.1".to_string(),
             status_code,
             status,
-            body
+            body,
+            headers,
+        }
+    }
+
+    pub fn header(&mut self, header: String, value: String) -> HttpResponse {
+        self.headers.insert(header, value);
+        HttpResponse {
+            version: self.version.clone(),
+            status_code: self.status_code,
+            status: self.status.clone(),
+            body: self.body.clone(),
+            headers: self.headers.clone(),
         }
     }
 
     pub async fn encode(&self, mut write_stream: OwnedWriteHalf) {
         let head = format!("{} {} {}", self.version, self.status_code, self.status);
-        let headers: HashMap<String, String> = HashMap::from([
-            ("Content-Length".to_string(), (self.body.len()+1).to_string()),
-        ]);
+        let mut headers = self.headers.clone();
+        headers.insert("Content-Length".to_string(), (self.body.len()).to_string());
         let headers = headers.iter().map(|(key, val)| format!("{}: {}", key, val)).collect::<Vec<String>>().join("\n");
         let response = format!("{}\r\n{}\r\n\r\n{}", head, headers, self.body);
         let _ = write_stream.write_all(&response.as_bytes()).await;

@@ -1,6 +1,6 @@
 use std::{error::Error, thread::JoinHandle};
 use std::env;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::{thread, time};
 
 use tokio::net::TcpListener;
@@ -10,20 +10,31 @@ use reqwest::header::CONTENT_LENGTH;
 
 use http_request::{HttpRequest, HttpResponse};
 
+use serde::Serialize;
+
 #[macro_use] extern crate log;
+
+#[derive(Debug, Serialize)]
+enum Status {
+    IDLE,
+    RUNNING,
+}
 
 struct Worker {
     client: Client,
     url: String,
     master_url: String,
     thread: JoinHandle<()>,
-    sender: mpsc::Sender<usize>
+    sender: mpsc::Sender<usize>,
+    status: Arc<Mutex<Status>>,
 }
 
 impl Worker {
     fn new(client: Client, url: String, master_url: String) -> Worker {
         let (sender, receiver) = mpsc::channel();
         let master_url_clone = master_url.clone();
+        let status = Arc::new(Mutex::new(Status::IDLE));
+        let t_status = status.clone();
 
         let thread = thread::spawn(move || {
             loop {
@@ -36,6 +47,8 @@ impl Worker {
                     .header(CONTENT_LENGTH, response.len())
                     .body(response)
                     .send();
+                let mut status = t_status.lock().unwrap();
+                *status = Status::IDLE;
             }
         });
 
@@ -45,6 +58,7 @@ impl Worker {
             master_url,
             thread,
             sender,
+            status,
         }
     }
 
@@ -56,11 +70,17 @@ impl Worker {
     }
 
     fn healthcheck(&self) -> Result<HttpResponse, Box<dyn Error>> {
-        Ok(HttpResponse::new(200, "OK".to_string(), "OK".to_string()))
+        let status = self.status.lock().unwrap();
+        let status = serde_json::to_string(&*status).unwrap();
+        let mut res = HttpResponse::new(200, "OK".to_string(), status);
+        res.header("Content-Type".to_string(), "application/json".to_string());
+        Ok(res)
     }
 
-    fn process_task(&self) -> Result<HttpResponse, Box<dyn Error>> {
+    fn process_task(&mut self) -> Result<HttpResponse, Box<dyn Error>> {
         info!("Processing...");
+        let mut status = self.status.lock().unwrap();
+        *status = Status::RUNNING;
         self.sender.send(2).unwrap();
         Ok(HttpResponse::new(200, "OK".to_string(), "OK".to_string()))
     }
