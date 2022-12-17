@@ -8,6 +8,8 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio::task;
 use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
+
 use http_request::{HttpRequest, HttpResponse};
 
 use futures::future::join_all;
@@ -16,10 +18,12 @@ use reqwest::Client;
 
 use serde::Deserialize;
 
+use aws_sdk_s3 as s3;
+
 const IP_ADDRES: &str = "0.0.0.0";
 const PORT_NUMBER: isize = 5100;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 enum WorkerStatus {
     IDLE,
     RUNNING,
@@ -113,7 +117,7 @@ impl MasterNode {
         let workers = self.workers.clone();
         let client = self.client.clone();
         task::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 interval.tick().await;
                 info!("Checkings workers health...");
@@ -125,23 +129,36 @@ impl MasterNode {
         });
     }
 
-    async fn run_task(&self, req: &HttpRequest) -> Result<HttpResponse, Box<dyn Error>> {
+    fn run_task(&self, req: &HttpRequest) -> Result<HttpResponse, Box<dyn Error>> {
         let workers = self.workers.clone();
         let client = self.client.clone();
 
         match &req.body {
             Some(task) => {
-                let task = task.clone();
-                tokio::task::spawn(async move {
+                let bucket = task.clone();
+                task::spawn(async move {
                     info!("Running task...");
-                    let mut workers = workers.as_ref().lock().await;
-                    for worker in &mut *workers {
-                        let _ = client.post(format!("{}/task", worker.url))
-                            .header("content-length", task.len())
-                            .body(task.to_string()).send().await;
-                        worker.status = WorkerStatus::RUNNING;
+                    let config = aws_config::load_from_env().await;
+                    let s3_client = s3::Client::new(&config);
+                    let res = s3_client.list_objects_v2().bucket(&bucket).send().await;
+
+                    match res {
+                        Ok(res) => {
+                            for obj in res.contents().unwrap_or_default() {
+                                let file = obj.key().unwrap_or_default().to_string();
+                                info!("File {file}....");
+                                let path = format!("{bucket}/{file}");
+                                let worker_index = get_idle_worker_index(workers.as_ref()).await;
+                                let mut workers = workers.as_ref().lock().await;
+                                let _ = client.post(format!("{}/task", workers[worker_index].url))
+                                    .header("content-length", path.len())
+                                    .body(path).send().await;
+                                workers[worker_index].status = WorkerStatus::RUNNING;
+                            }
+                        },
+                        Err(e) => println!("Something goes wrong! {}", e),
                     }
-                }).await?;
+                });
             },
             None => info!("No data received for processing"),
         }
@@ -160,6 +177,20 @@ impl MasterNode {
             "OK".to_string(),
         ))
     }
+
+}
+
+async fn get_idle_worker_index(workers: &Mutex<Vec<Worker>>) -> usize {
+    loop {
+        sleep(Duration::from_secs(3)).await;
+        let workers = workers.lock().await;
+        for (i, worker) in workers.iter().enumerate() {
+            if worker.status == WorkerStatus::IDLE {
+                return i;
+            }
+        }
+        info!("Waiting...");
+    }
 }
 
 async fn route(node: &mut MasterNode, req: &HttpRequest) -> Result<HttpResponse, Box<dyn Error>> {
@@ -170,7 +201,7 @@ async fn route(node: &mut MasterNode, req: &HttpRequest) -> Result<HttpResponse,
             node.register_worker(worker_url.to_string()).await
         },
         Some("/status") => node.check_workers_status().await,
-        Some("/task") => node.run_task(req).await,
+        Some("/task") => node.run_task(req),
         Some("/result") => node.process_result(req).await,
         _ => Ok(HttpResponse::new(404, "NOT FOUND".to_string(), "".to_string())),
     }

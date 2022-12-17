@@ -25,7 +25,7 @@ struct Worker {
     url: String,
     master_url: String,
     thread: JoinHandle<()>,
-    sender: mpsc::Sender<usize>,
+    sender: mpsc::Sender<String>,
     status: Arc<Mutex<Status>>,
 }
 
@@ -39,8 +39,9 @@ impl Worker {
         let thread = thread::spawn(move || {
             loop {
                 let client = reqwest::blocking::Client::new();
-                let _ = receiver.recv().unwrap();
+                let task = receiver.recv().unwrap();
                 thread::sleep(time::Duration::from_secs(15));
+                info!("Task {task}");
                 info!("Jobs done!");
                 let response = "some results".to_string();
                 let _ = client.post(format!("{}/result", &master_url_clone))
@@ -77,11 +78,11 @@ impl Worker {
         Ok(res)
     }
 
-    fn process_task(&mut self) -> Result<HttpResponse, Box<dyn Error>> {
+    fn process_task(&mut self, task: &String) -> Result<HttpResponse, Box<dyn Error>> {
         info!("Processing...");
         let mut status = self.status.lock().unwrap();
         *status = Status::RUNNING;
-        self.sender.send(2).unwrap();
+        self.sender.send(task.to_string()).unwrap();
         Ok(HttpResponse::new(200, "OK".to_string(), "OK".to_string()))
     }
 }
@@ -89,7 +90,7 @@ impl Worker {
 async fn route(node: &mut Worker, req: &HttpRequest) -> Result<HttpResponse, Box<dyn Error>> {
     match req.uri.as_deref() {
         Some("/healthcheck") => node.healthcheck(),
-        Some("/task") => node.process_task(),
+        Some("/task") => node.process_task(req.body.as_ref().unwrap()),
         _ => Ok(HttpResponse::new(
             404,
             "NOT FOUND".to_string(),
