@@ -149,37 +149,85 @@ pub struct HttpResponse {
     pub status: String,
     pub body: String,
     pub headers: HashMap<String, String>,
+    write_stream: OwnedWriteHalf,
 }
 
 impl HttpResponse {
-    pub fn new(status_code: usize, status: String, body: String) -> Self {
+
+    pub fn new(write_stream: OwnedWriteHalf) -> Self {
         let headers: HashMap<String, String> = HashMap::new();
         HttpResponse {
             version: "HTTP/1.1".to_string(),
-            status_code,
-            status,
-            body,
+            status_code: 200,
+            status: "OK".to_string(),
+            body: "".to_string(),
             headers,
+            write_stream,
         }
     }
 
-    pub fn header(&mut self, header: String, value: String) -> HttpResponse {
+    pub fn add_header(mut self, header: String, value: String) -> Self {
         self.headers.insert(header, value);
-        HttpResponse {
-            version: self.version.clone(),
-            status_code: self.status_code,
-            status: self.status.clone(),
-            body: self.body.clone(),
-            headers: self.headers.clone(),
-        }
+        self
     }
 
-    pub async fn encode(&self, mut write_stream: OwnedWriteHalf) {
+    pub fn status(mut self, status: String) -> Self {
+        self.status = status;
+        self
+    }
+
+    pub fn status_code(mut self, status_code: usize) -> Self {
+        self.status_code = status_code;
+        self
+    }
+
+    pub fn body(mut self, body: String) -> Self {
+        self.body = body;
+        self
+    }
+
+    pub async fn send(&mut self) {
         let head = format!("{} {} {}", self.version, self.status_code, self.status);
         let mut headers = self.headers.clone();
         headers.insert("Content-Length".to_string(), (self.body.len()).to_string());
         let headers = headers.iter().map(|(key, val)| format!("{}: {}", key, val)).collect::<Vec<String>>().join("\n");
         let response = format!("{}\r\n{}\r\n\r\n{}", head, headers, self.body);
-        let _ = write_stream.write_all(&response.as_bytes()).await;
+        let _ = self.write_stream.write_all(&response.as_bytes()).await;
+    }
+}
+
+pub type Route = Box<dyn Fn(HttpRequest, HttpResponse) -> Result<(), Box<dyn Error>>>;
+
+pub struct Router {
+    routes: HashMap<String, Route>,
+}
+
+impl Router {
+    pub fn new() -> Self {
+        Router {
+            routes: HashMap::new(),
+        }
+    }
+
+    pub fn register(&mut self, url: String, action: Route) {
+        self.routes.insert(url, action);
+    }
+
+    pub async fn process(&self, stream: tokio::net::TcpStream) {
+        let (read_stream, write_stream) = stream.into_split();
+        let req = HttpRequest::decode(read_stream).await;
+        let res = HttpResponse::new(write_stream);
+        let uri = req.as_ref().unwrap().uri.as_ref();
+        let route = self.routes.get(uri.unwrap());
+        let _ = match route {
+            Some(route) => (route)(req.unwrap(), res),
+            None => {
+                res.status("NOT_FOUND".to_string())
+                    .status_code(404)
+                    .body("PAGE NOT FOUND".to_string())
+                    .send().await;
+                Ok(())
+            },
+        };
     }
 }
