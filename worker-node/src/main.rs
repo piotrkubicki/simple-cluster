@@ -3,12 +3,17 @@ use std::error::Error;
 use std::env;
 use std::sync::{mpsc, Arc, Mutex};
 use std::{thread, time};
+use std::str;
+use std::collections::HashMap;
 
 use tokio::net::TcpListener;
 use tokio::task;
+use tokio::runtime::Handle;
 
 use reqwest::Client;
 use reqwest::header::CONTENT_LENGTH;
+
+use aws_sdk_s3 as s3;
 
 use http_request::{Route, Router};
 
@@ -36,21 +41,40 @@ impl Worker {
         let master_url_clone = master_url.clone();
         let status = Arc::new(Mutex::new(Status::IDLE));
         let t_status = status.clone();
+        let handle = Handle::current();
 
         thread::spawn(move || {
             loop {
                 let client = reqwest::blocking::Client::new();
-                let task = receiver.recv().unwrap();
-                info!("Task {task}");
-                thread::sleep(time::Duration::from_secs(5));
-                info!("Jobs done!");
-                let response = "some results".to_string();
-                let _ = client.post(format!("{}/result", &master_url_clone))
-                    .header(CONTENT_LENGTH, response.len())
-                    .body(response)
-                    .send();
-                let mut status = t_status.lock().unwrap();
-                *status = Status::IDLE;
+                let task: String = receiver.recv().unwrap();
+                if let Some((bucket, key)) = task.rsplit_once("/") {
+                    handle.block_on(async {
+                        let config = aws_config::load_from_env().await;
+                        let s3_client = s3::Client::new(&config);
+                        let res = s3_client.get_object().bucket(bucket).key(key).send().await;
+                        if let Ok(res) = res.unwrap().body.collect().await {
+                            let data = res.into_bytes();
+                            let data = str::from_utf8(&data).unwrap()
+                                .split_whitespace()
+                                .map(|x| x.to_lowercase().replace(&['(', ')', '.', ','][..], ""));
+                            let mut res = HashMap::new();
+
+                            for item in data {
+                                *res.entry(item).or_insert(0) += 1;
+                            }
+                            info!("{:?}", res);
+                        }
+                    });
+                    thread::sleep(time::Duration::from_secs(5));
+                    info!("Jobs done!");
+                    let response = "some results".to_string();
+                    let _ = client.post(format!("{}/result", &master_url_clone))
+                        .header(CONTENT_LENGTH, response.len())
+                        .body(response)
+                        .send();
+                    let mut status = t_status.lock().unwrap();
+                    *status = Status::IDLE;
+                }
             }
         });
 
