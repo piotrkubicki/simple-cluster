@@ -1,5 +1,6 @@
 #[macro_use] extern crate log;
 
+use std::env;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -11,6 +12,8 @@ use tokio::time::{sleep, Duration};
 use futures::future::join_all;
 
 use reqwest::Client;
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 
 use serde::Deserialize;
 
@@ -42,7 +45,7 @@ impl Worker {
         }
     }
 
-    async fn healthcheck(&mut self, client: &Client) {
+    async fn healthcheck(&mut self, client: &ClientWithMiddleware) {
         let healthcheck = client.get(format!("{}/healthcheck", self.url)).send();
         match tokio::time::timeout(tokio::time::Duration::from_secs(2), healthcheck).await {
             Ok(res) => {
@@ -53,26 +56,26 @@ impl Worker {
                         } else {
                             match res.json().await {
                                 Ok(status) => self.status = status,
-                                Err(e) => eprintln!("{e}"),
+                                Err(e) => error!("{e}"),
                             }
                         }
                     },
                     Err(_) => self.status = WorkerStatus::ERROR,
                 }
             },
-            Err(e) => eprintln!("Something goes wrong {e}"),
+            Err(e) => error!("Something goes wrong {e}"),
         }
     }
 }
 
-fn workers_healthcheck(workers: Arc<Mutex<Vec<Worker>>>, client: Client) {
+fn workers_healthcheck(workers: Arc<Mutex<Vec<Worker>>>, client: ClientWithMiddleware, wait_time_in_sec: u64) {
     let workers = workers.clone();
     let client = client.clone();
     task::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(wait_time_in_sec));
         loop {
             interval.tick().await;
-            info!("Checkings workers health...");
+            debug!("Checkings workers health...");
             let mut workers = workers.lock().await;
             let tasks: Vec<_> = workers.iter_mut().map(|worker| worker.healthcheck(&client)).collect();
             join_all(tasks).await;
@@ -86,24 +89,26 @@ fn workers_healthcheck(workers: Arc<Mutex<Vec<Worker>>>, client: Client) {
             for failed_worker in failed_workers {
                 workers.remove(failed_worker);
             }
-            info!("Health check done");
+            debug!("Health check done");
         }
     });
 }
 
 async fn get_idle_worker_index(workers: &Mutex<Vec<Worker>>) -> usize {
     loop {
-        sleep(Duration::from_secs(3)).await;
-        let workers = workers.lock().await;
-        for (i, worker) in workers.iter().enumerate() {
-            if worker.status == WorkerStatus::IDLE {
-                return i;
+        {
+            let workers = workers.lock().await;
+            for (i, worker) in workers.iter().enumerate() {
+                if worker.status == WorkerStatus::IDLE {
+                    return i;
+                }
             }
         }
+        sleep(Duration::from_secs(3)).await;
     }
 }
 
-fn run_task(workers: Arc<Mutex<Vec<Worker>>>, client: Client) -> Route {
+fn run_task(workers: Arc<Mutex<Vec<Worker>>>, client: ClientWithMiddleware) -> Route {
     Box::new(move |req, res| {
         let workers = workers.clone();
         let client = client.clone();
@@ -129,7 +134,7 @@ fn run_task(workers: Arc<Mutex<Vec<Worker>>>, client: Client) -> Route {
                                 workers[worker_index].status = WorkerStatus::RUNNING;
                             }
                         },
-                        Err(e) => println!("Something goes wrong! {}", e),
+                        Err(e) => error!("Something goes wrong! {}", e),
                     }
                 });
                 task::spawn(async move {
@@ -139,7 +144,7 @@ fn run_task(workers: Arc<Mutex<Vec<Worker>>>, client: Client) -> Route {
                         .send().await;
                 });
             },
-            None => info!("No data received for processing"),
+            None => warn!("No data received for processing"),
         };
 
         Ok(())
@@ -147,8 +152,10 @@ fn run_task(workers: Arc<Mutex<Vec<Worker>>>, client: Client) -> Route {
 }
 
 fn process_result() -> Route {
-    Box::new(|_req, res| {
+    Box::new(|req, res| {
         task::spawn(async move{
+            let data = req.body.unwrap();
+            info!("Result: {:?}", data);
             res.status("OK".to_string())
                 .status_code(200)
                 .body("OK".to_string())
@@ -197,8 +204,12 @@ fn check_workers_status(workers: Arc<Mutex<Vec<Worker>>>) -> Route {
 async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
+    let wait_time_in_sec: u64 = env::var("WAIT_TIME").unwrap_or("1".to_string()).parse().unwrap();
     let workers: Arc<Mutex<Vec<Worker>>> = Arc::new(Mutex::new(Vec::new()));
-    let client = Client::new();
+    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(10);
+    let client = ClientBuilder::new(Client::new())
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+        .build();
 
     let mut router = Router::new();
     router.register("/register".to_string(), register_worker(workers.clone()));
@@ -209,7 +220,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let addr = format!("{}:{}", IP_ADDRES, PORT_NUMBER);
     let listener = TcpListener::bind(&addr).await?;
 
-    workers_healthcheck(workers.clone(), client.clone());
+    workers_healthcheck(workers.clone(), client.clone(), wait_time_in_sec);
 
     loop {
         match listener.accept().await {
@@ -217,7 +228,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 router.process(stream).await;
             },
             Err(e) => {
-                eprintln!("{e}");
+                error!("{e}");
                 break;
             }
         }

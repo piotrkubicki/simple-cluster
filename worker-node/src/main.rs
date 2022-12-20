@@ -2,10 +2,12 @@ use std::sync::mpsc::Sender;
 use std::error::Error;
 use std::env;
 use std::sync::{mpsc, Arc, Mutex};
-use std::{thread, time};
+use std::thread;
 use std::str;
 use std::collections::HashMap;
 
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 use tokio::net::TcpListener;
 use tokio::task;
 use tokio::runtime::Handle;
@@ -27,8 +29,21 @@ enum Status {
     RUNNING,
 }
 
+#[derive(Serialize)]
+struct TaskResult {
+    data: HashMap<String, usize>,
+}
+
+impl TaskResult {
+    fn new(data: HashMap<String, usize>) -> Self {
+        TaskResult {
+            data
+        }
+    }
+}
+
 struct Worker {
-    client: Client,
+    client: ClientWithMiddleware,
     url: String,
     master_url: String,
     sender: mpsc::Sender<String>,
@@ -36,7 +51,7 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(client: Client, url: String, master_url: String) -> Worker {
+    fn new(client: ClientWithMiddleware, url: String, master_url: String) -> Worker {
         let (sender, receiver) = mpsc::channel();
         let master_url_clone = master_url.clone();
         let status = Arc::new(Mutex::new(Status::IDLE));
@@ -48,7 +63,8 @@ impl Worker {
                 let client = reqwest::blocking::Client::new();
                 let task: String = receiver.recv().unwrap();
                 if let Some((bucket, key)) = task.rsplit_once("/") {
-                    handle.block_on(async {
+                    let result = handle.block_on(async {
+                        let mut result = HashMap::new();
                         let config = aws_config::load_from_env().await;
                         let s3_client = s3::Client::new(&config);
                         let res = s3_client.get_object().bucket(bucket).key(key).send().await;
@@ -57,17 +73,16 @@ impl Worker {
                             let data = str::from_utf8(&data).unwrap()
                                 .split_whitespace()
                                 .map(|x| x.to_lowercase().replace(&['(', ')', '.', ','][..], ""));
-                            let mut res = HashMap::new();
 
                             for item in data {
-                                *res.entry(item).or_insert(0) += 1;
+                                *result.entry(item).or_insert(0) += 1;
                             }
-                            info!("{:?}", res);
                         }
+                        result
                     });
-                    thread::sleep(time::Duration::from_secs(5));
-                    info!("Jobs done!");
-                    let response = "some results".to_string();
+                    debug!("Jobs done!");
+                    let task_result = TaskResult::new(result);
+                    let response = serde_json::to_string(&task_result).unwrap();
                     let _ = client.post(format!("{}/result", &master_url_clone))
                         .header(CONTENT_LENGTH, response.len())
                         .body(response)
@@ -124,7 +139,7 @@ fn process_task(status: Arc<Mutex<Status>>, sender: Sender<String>) -> Route {
         let status = status.clone();
         let sender = sender.clone();
         task::spawn(async move {
-            info!("Processing...");
+            debug!("Processing...");
             {
                 let mut status = status.lock().unwrap();
                 *status = Status::RUNNING;
@@ -143,24 +158,29 @@ fn process_task(status: Arc<Mutex<Status>>, sender: Sender<String>) -> Route {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
-    let ip_addr = env::var("IP_ADDRES").unwrap_or("0.0.0.0".to_string());
-    let port = env::var("PORT_NUMBER").unwrap_or("5101".to_string());
+    let ip_addr = env::var("WORKER_IP").unwrap_or("0.0.0.0".to_string());
+    let port = env::var("WORKER_PORT").unwrap_or("5101".to_string());
     let addr = format!("{}:{}", ip_addr, port);
 
-    let client = Client::new();
-    let worker_url = format!("http://localhost:{port}");
-    let master_url = env::var("MASTER_URL").unwrap();
+    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(10);
+    let client = ClientBuilder::new(Client::new())
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+        .build();
+    let worker_url = format!("http://{addr}");
+    let master_host = env::var("SIMPLE_CLUSTER_MASTER_NODE_SVC_SERVICE_HOST").unwrap_or("0.0.0.0".to_string());
+    let master_port = env::var("SIMPLE_CLUSTER_MASTER_NODE_SVC_SERVICE_PORT").unwrap_or("5100".to_string());
+    let master_url = format!("http://{master_host}:{master_port}");
     let worker = Worker::new(client, worker_url, master_url);
 
     let mut router = Router::new();
     router.register("/healthcheck".to_string(), healthcheck(worker.status.clone()));
     router.register("/task".to_string(), process_task(worker.status.clone(), worker.sender.clone()));
 
-    info!("Registering...");
-    worker.register().await?;
-    info!("Request accepted. Listening...");
 
-    let listener = TcpListener::bind(&addr).await?;
+    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    debug!("Registering...");
+    worker.register().await?;
+    debug!("Request accepted. Listening...");
 
     loop {
         match listener.accept().await {
@@ -168,7 +188,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 router.process(stream).await;
             },
             Err(e) => {
-                eprintln!("{e}");
+                error!("{e}");
                 break;
             }
         }

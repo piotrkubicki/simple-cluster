@@ -1,0 +1,9 @@
+master_image: master-node:0.1.0
+worker_image: worker-node:0.1.0
+worker_port: 5101
+worker_replicas: 2
+log_level: info
+aws_access_key_id: key_id
+aws_secret_access_key: access_key
+aws_region: eu-west-1
+wait_time_in_sec: 1

@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-master-node
+spec:
+  selector:
+    matchLabels:
+      type: master-node
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        type: master-node
+    spec:
+      containers:
+      - name: master-node
+        image: {{ .Values.master_image }}
+        env:
+        - name: "RUST_LOG"
+          value: {{ .Values.log_level }}
+        - name: "AWS_ACCESS_KEY_ID"
+          valueFrom:
+            secretKeyRef:
+              key: aws_access_key_id
+              name: {{ .Release.Name }}-aws-auth
+        - name: "AWS_SECRET_ACCESS_KEY"
+          valueFrom:
+            secretKeyRef:
+              key: aws_secret_access_key
+              name: {{ .Release.Name }}-aws-auth
+        - name: "AWS_REGION"
+          value: {{ .Values.aws_region }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-worker-node
+spec:
+  selector:
+    matchLabels:
+      type: worker-node
+  replicas: {{ .Values.worker_replicas }}
+  template:
+    metadata:
+      labels:
+        type: worker-node
+    spec:
+      containers:
+      - name: worker-node
+        image: {{ .Values.worker_image }}
+        env:
+        - name: RUST_LOG
+          value: {{ .Values.log_level }}
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              key: aws_access_key_id
+              name: {{ .Release.Name }}-aws-auth
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              key: aws_secret_access_key
+              name: {{ .Release.Name }}-aws-auth
+        - name: AWS_REGION
+          value: {{ .Values.aws_region }}
+        - name: WORKER_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: WORKER_PORT
+          value: {{ .Values.worker_port | quote }}
+        - name: WAIT_TIME_IN_SEC
+          value: {{ .Values.wait_time_in_sec | quote }}
