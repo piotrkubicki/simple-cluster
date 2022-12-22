@@ -2,7 +2,7 @@ FROM rust:1.64-buster as builder
 
 WORKDIR app
 
-COPY ./http_request ./http_request/
+COPY ./commons ./commons/
 
 COPY ./worker-node ./src/ 
 

@@ -473,6 +473,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commons"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "tokio",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -829,15 +838,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http_request"
-version = "0.1.0"
-dependencies = [
- "env_logger",
- "log",
- "tokio",
-]
-
-[[package]]
 name = "httparse"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1031,9 +1031,9 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
+ "commons",
  "env_logger",
  "futures",
- "http_request",
  "log",
  "reqwest",
  "reqwest-middleware",
